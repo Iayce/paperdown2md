@@ -1,0 +1,23 @@
+{
+  "skill_name": "paperdown2md",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我把 arXiv 上的 Attention Is All You Need 下载并转成 markdown，放到 ~/papers/attention/ 下面，文件夹就用论文标题就行",
+      "expected_output": "~/papers/attention/<论文标题>/ 下有 PDF、full.md、images/",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "我有两篇：1) https://arxiv.org/abs/1706.03762 2) CIDD Collaborative Intelligence drug design LLM。都放到 paperdown2md/example/，第二篇文件夹叫 CIDD",
+      "expected_output": "example 下两个独立文件夹，各含 PDF、full.md、images/；CIDD 文件夹用短名",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "只帮我把 10.1038/s41586-021-03824-4 的 PDF 下到 ./datasets/alphafold/，先不要 mineru",
+      "expected_output": "./datasets/alphafold/<name>/ 下仅有 PDF，无 full.md",
+      "files": []
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+.DS_Store
+*.swp
+*~
+
+# Secrets — never commit MinerU or API tokens
+.env
+.env.*
+key
+KEY
+**/key
+**/KEY
+*token*
+*secret*
+
+# MinerU temp output
+_mineru_out/
