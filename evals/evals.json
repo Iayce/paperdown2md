@@ -18,6 +18,12 @@
       "prompt": "只帮我把 10.1038/s41586-021-03824-4 的 PDF 下到 ./datasets/alphafold/，先不要 mineru",
       "expected_output": "./datasets/alphafold/<name>/ 下仅有 PDF，无 full.md",
       "files": []
+    },
+    {
+      "id": 4,
+      "prompt": "这篇公众号文章里的论文帮我下载转 markdown：https://mp.weixin.qq.com/s/jMW2lbgiHDka8CASFtQ81w，放到 ~/papers/codefp/",
+      "expected_output": "~/papers/codefp/<公众号标题或 --name>/ 下有 PDF、full.md、images/；HTTP 失败时走 CDP 浏览器",
+      "files": []
     }
   ]
 }

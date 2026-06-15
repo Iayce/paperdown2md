@@ -14,3 +14,7 @@ KEY
 
 # MinerU temp output
 _mineru_out/
+
+# Python
+__pycache__/
+*.pyc

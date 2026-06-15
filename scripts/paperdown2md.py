@@ -24,7 +24,20 @@ ARXIV_ID_RE = re.compile(
     re.I,
 )
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\]]+)\b", re.I)
+WEIXIN_URL_RE = re.compile(r"https?://mp\.weixin\.qq\.com/s/", re.I)
+OG_TITLE_RE = re.compile(
+    r'property="og:title"\s+content="([^"]+)"|content="([^"]+)"\s+property="og:title"',
+    re.I,
+)
+PAPER_HOST_RE = re.compile(
+    r"(arxiv\.org|doi\.org|biorxiv\.org|medrxiv\.org|\.pdf(?:\?|#|$))",
+    re.I,
+)
 INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+WEIXIN_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 # skillsplace 环境路径（与用户规则一致）
 SKILLSPLACE_MARKERS = (
@@ -67,6 +80,15 @@ def http_get_json(url: str, timeout: int = 60) -> dict:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def http_get_text(url: str, timeout: int = 120, user_agent: str | None = None) -> str:
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": user_agent or "paperdown2md/1.0"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
 
 
 def download_file(url: str, dest: Path, timeout: int = 300) -> None:
@@ -136,8 +158,208 @@ def pick_pdf_url(work: dict) -> tuple[str | None, str | None]:
     return None, title
 
 
-def resolve_source(source: str) -> tuple[str, str]:
-    """Return (pdf_url, suggested_title)."""
+def is_weixin_url(source: str) -> bool:
+    return bool(WEIXIN_URL_RE.search(source)) or (
+        "mp.weixin.qq.com" in source and "/s/" in source
+    )
+
+
+def normalize_weixin_html(html: str) -> str:
+    return (
+        html.replace("\\x3c", "<")
+        .replace("\\x3e", ">")
+        .replace("\\x26", "&")
+        .replace("\\x22", '"')
+    )
+
+
+def extract_weixin_title(html: str) -> str | None:
+    m = OG_TITLE_RE.search(html)
+    if not m:
+        return None
+    return (m.group(1) or m.group(2) or "").strip() or None
+
+
+def extract_paper_urls_from_html(html: str) -> list[str]:
+    html = normalize_weixin_html(html)
+    raw_urls = re.findall(r"https?://[^\s\"'<>\\]+", html)
+    seen: set[str] = set()
+    paper_urls: list[str] = []
+    for raw in raw_urls:
+        url = raw.rstrip(".,;)]}>\"'\\")
+        if not PAPER_HOST_RE.search(url):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        paper_urls.append(url)
+    return paper_urls
+
+
+def weixin_page_blocked(html: str) -> bool:
+    return "环境异常" in html and len(html) < 100_000
+
+
+def weixin_page_usable(html: str) -> bool:
+    if weixin_page_blocked(html):
+        return False
+    return bool(extract_paper_urls_from_html(html))
+
+
+def cdp_proxy_base() -> str:
+    return os.environ.get("CDP_PROXY_URL", "http://127.0.0.1:3456").rstrip("/")
+
+
+def cdp_proxy_ready(base: str, timeout: int = 3) -> bool:
+    try:
+        with urllib.request.urlopen(f"{base}/health", timeout=timeout) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def ensure_cdp_proxy() -> str | None:
+    """Ensure web-access CDP proxy is running; return base URL or None."""
+    base = cdp_proxy_base()
+    if cdp_proxy_ready(base):
+        return base
+
+    check_deps = Path.home() / ".cursor/skills/web-access/scripts/check-deps.mjs"
+    if not check_deps.is_file():
+        return None
+
+    print("[paperdown2md] Starting CDP proxy via web-access check-deps…")
+    try:
+        subprocess.run(
+            ["node", str(check_deps)],
+            check=True,
+            timeout=45,
+            capture_output=True,
+            text=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+
+    return base if cdp_proxy_ready(base, timeout=8) else None
+
+
+def cdp_request_json(
+    url: str,
+    *,
+    data: bytes | None = None,
+    method: str = "GET",
+    timeout: int = 90,
+) -> dict:
+    req = urllib.request.Request(url, data=data, method=method)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def fetch_weixin_html_browser(url: str) -> str:
+    """Fetch WeChat article HTML via Chrome CDP (web-access proxy)."""
+    base = ensure_cdp_proxy()
+    if not base:
+        raise ValueError(
+            "Browser fallback unavailable: CDP proxy not running. "
+            "Enable Chrome remote debugging (chrome://inspect/#remote-debugging), "
+            "run `node ~/.cursor/skills/web-access/scripts/check-deps.mjs`, "
+            "or pass the arXiv/DOI link directly."
+        )
+
+    encoded = urllib.parse.quote(url, safe="")
+    tab = cdp_request_json(f"{base}/new?url={encoded}", timeout=120)
+    target_id = tab.get("targetId")
+    if not target_id:
+        raise ValueError(f"CDP /new returned no targetId: {tab}")
+
+    try:
+        try:
+            urllib.request.urlopen(
+                f"{base}/scroll?target={target_id}&direction=bottom",
+                timeout=20,
+            )
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+
+        result = cdp_request_json(
+            f"{base}/eval?target={target_id}",
+            data=b"document.documentElement.outerHTML",
+            method="POST",
+            timeout=120,
+        )
+        html = result.get("value") or ""
+        if not isinstance(html, str) or not html.strip():
+            raise ValueError("Browser returned empty HTML from WeChat page")
+        return html
+    finally:
+        try:
+            urllib.request.urlopen(f"{base}/close?target={target_id}", timeout=5)
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+
+
+def fetch_weixin_html(url: str) -> str:
+    """HTTP first; fall back to browser CDP when blocked or missing paper links."""
+    html: str | None = None
+    curl_error: Exception | None = None
+
+    try:
+        html = http_get_text(url, timeout=120, user_agent=WEIXIN_UA)
+    except urllib.error.URLError as e:
+        curl_error = e
+
+    if html and weixin_page_usable(html):
+        print("[paperdown2md] WeChat article fetched via HTTP")
+        return html
+
+    if html and weixin_page_blocked(html):
+        reason = "verification required (环境异常)"
+    elif html:
+        reason = "no arXiv/DOI/PDF links in HTTP response"
+    else:
+        reason = f"HTTP failed ({curl_error})"
+
+    print(f"[paperdown2md] HTTP insufficient ({reason}); trying browser (CDP)…")
+    browser_html = fetch_weixin_html_browser(url)
+
+    if weixin_page_blocked(browser_html):
+        raise ValueError(
+            "WeChat page still blocked after browser fetch. "
+            "Complete verification in Chrome, or pass the arXiv/DOI link directly."
+        )
+    if not weixin_page_usable(browser_html):
+        title = extract_weixin_title(browser_html)
+        hint = f" Title: {title!r}." if title else ""
+        raise ValueError(
+            f"No arXiv/DOI/PDF link found in WeChat article via browser.{hint} "
+            "Paste the paper link directly if the article only links GitHub or a project page."
+        )
+
+    print("[paperdown2md] WeChat article fetched via browser (CDP)")
+    return browser_html
+
+
+def resolve_weixin_article(url: str) -> tuple[str, str]:
+    """Fetch WeChat article, extract first arXiv/DOI/PDF link, return (pdf_url, title)."""
+    print(f"[paperdown2md] Resolving WeChat article: {url}")
+    html = fetch_weixin_html(url)
+
+    title = extract_weixin_title(html)
+    paper_urls = extract_paper_urls_from_html(html)
+    if not paper_urls:
+        hint = f" Title: {title!r}." if title else ""
+        raise ValueError(
+            f"No arXiv/DOI/PDF link found in WeChat article.{hint} "
+            "Paste the paper link directly if the article only links GitHub or a project page."
+        )
+
+    print(f"[paperdown2md] Found {len(paper_urls)} paper link(s); using: {paper_urls[0]}")
+    pdf_url, _ = resolve_paper_source(paper_urls[0])
+    return pdf_url, title or _
+
+
+def resolve_paper_source(source: str) -> tuple[str, str]:
+    """Resolve arXiv / DOI / PDF / OpenAlex title → (pdf_url, suggested_title)."""
     source = source.strip()
     if not source:
         raise ValueError("empty source")
@@ -170,6 +392,14 @@ def resolve_source(source: str) -> tuple[str, str]:
         f"Cannot resolve PDF for: {source!r}. "
         "Use arXiv URL/ID, DOI, direct .pdf URL, or English title for OpenAlex search."
     )
+
+
+def resolve_source(source: str) -> tuple[str, str]:
+    """Return (pdf_url, suggested_title). Supports WeChat article URLs as entry points."""
+    source = source.strip()
+    if is_weixin_url(source):
+        return resolve_weixin_article(source)
+    return resolve_paper_source(source)
 
 
 def load_mineru_token() -> str | None:
@@ -271,7 +501,7 @@ def main() -> int:
     parser.add_argument(
         "sources",
         nargs="+",
-        help="arXiv URL/ID, DOI, direct PDF URL, or paper title (OpenAlex search)",
+        help="arXiv URL/ID, DOI, direct PDF URL, WeChat article URL, or paper title (OpenAlex)",
     )
     parser.add_argument(
         "-o",

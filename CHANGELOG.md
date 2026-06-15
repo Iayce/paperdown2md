@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0] — 2026-06-15
+
+### Added
+
+- **WeChat article URLs** (`https://mp.weixin.qq.com/s/...`) as download entry points
+- Parse `og:title` and arXiv / DOI / PDF links from公众号正文
+- **Browser fallback**: when HTTP/curl is blocked (e.g. 环境异常) or finds no paper links, auto-retry via Chrome CDP (web-access proxy on `localhost:3456`)
+
 ## [1.0.0] — 2026-06-02
 
 ### Added
