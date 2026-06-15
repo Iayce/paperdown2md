@@ -1,10 +1,10 @@
 ---
 name: paperdown2md
 description: >-
-  将一篇或多篇学术论文（标题、arXiv/DOI/URL、PDF 链接、微信公众号文章链接等）下载为 PDF，并用 MinerU
+  将一篇或多篇学术论文（标题、arXiv/DOI/URL、微信公众号/小红书帖子链接等）下载为 PDF，并用 MinerU
   extract（需 Token）转为 full.md 与 images/，按论文在指定目录下建独立文件夹。
   只要用户提到论文下载转 Markdown、paperdown2md、批量拉论文 PDF、MinerU 解析论文、
-  按标题/链接整理文献目录、微信公众号论文链接、或要把 arXiv/DOI 论文落成 full.md，就应使用本 skill——
+  按标题/链接整理文献目录、公众号/小红书论文链接、或要把 arXiv/DOI 论文落成 full.md，就应使用本 skill——
   即使用户没有明确说「paperdown2md」。
 compatibility: >-
   需要 mineru-open-api CLI 与 MinerU Token（~/.cursor/skills/mineru/key 或
@@ -12,7 +12,7 @@ compatibility: >-
   在 skillsplace conda 环境中运行（macOS:
   /Users/jaycexu/anaconda3/envs/skillsplace；Windows: D:\Anaconda\envs\skillsplace；
   jumphost-inner: ~/xsjenv/miniconda3/envs/skillsplace）。禁止用系统 python3。
-version: 1.1.0
+version: 1.2.0
 ---
 
 # paperdown2md — 论文 PDF 下载 + MinerU 转 Markdown
@@ -31,7 +31,7 @@ version: 1.1.0
 
 ## 何时触发
 
-- 用户给出论文**标题**、**arXiv/DOI/链接**、**微信公众号文章链接**、或直接 **PDF URL**（可多个）
+- 用户给出论文**标题**、**arXiv/DOI/链接**、**微信公众号/小红书帖子链接**、或直接 **PDF URL**（可多个）
 - 用户指定**目标目录**（如 `paperdown2md/example/`、`~/papers/`）
 - 需要 **PDF + full.md + images** 三件套，且解析要走 **MinerU `extract`（Token）**，不要用 `flash-extract` 代替大论文
 
@@ -61,7 +61,7 @@ version: 1.1.0
 
 ### 3. 解析标识并下载 PDF
 
-**优先用 bundled 脚本**（解析 arXiv、DOI、直链 PDF、微信公众号文章、OpenAlex 标题检索）。
+**优先用 bundled 脚本**（解析 arXiv、DOI、直链 PDF、公众号/小红书帖子、OpenAlex/arXiv 标题检索）。
 
 **Python 必须在 skillsplace 环境执行**——用 `scripts/run.sh`（自动定位 skillsplace 的 Python），不要直接 `python3`：
 
@@ -90,21 +90,27 @@ bash paperdown2md/scripts/run.sh \
 - arXiv：`https://arxiv.org/abs/xxxx.xxxxx` 或 `xxxx.xxxxx`
 - DOI：`10.1038/...` 或 `https://doi.org/...`
 - 直接 PDF：`https://....pdf`
-- **微信公众号文章**：`https://mp.weixin.qq.com/s/...`（脚本抓取正文中的 arXiv/DOI/PDF 链接）
+- **微信公众号文章**：`https://mp.weixin.qq.com/s/...`
+- **小红书帖子**：`https://www.xiaohongshu.com/explore/...`（建议保留分享链接中的 `xsec_token` 等参数）
 - 英文标题：脚本经 OpenAlex 搜索并取最佳开放获取 PDF
 
-#### 微信公众号链接（v1.1+）
+#### 社交媒体帖子（公众号 / 小红书，v1.1+）
 
-以公众号文章为起点时，脚本会：
+以公众号或小红书帖子为起点时，脚本会：
 
-1. **先用 HTTP** 拉取页面 HTML，解析 `og:title` 与正文中的 arXiv / DOI / PDF 链接
-2. **若失败或被反爬**（如「环境异常」、无论文链接）→ **自动切浏览器 CDP**（[web-access](~/.cursor/skills/web-access/SKILL.md) 的 Chrome Proxy，`localhost:3456`）
-3. 用文章标题作文件夹名（可用 `--name` 覆盖），再按既有流程下载 PDF + MinerU
+1. **公众号**：先用 HTTP 拉 HTML；**小红书**：默认走浏览器 CDP（内容多为 JS 渲染）
+2. **若 HTTP 失败或被反爬**（如「环境异常」、笔记无法浏览）→ **自动切浏览器 CDP**（[web-access](~/.cursor/skills/web-access/SKILL.md) 的 Chrome Proxy，`localhost:3456`）
+3. 从正文提取 arXiv / DOI / PDF 直链；**若无直链** → 用帖子标题与正文关键词做 **OpenAlex + arXiv API** 文献检索（含相关性过滤）
+4. 用帖子标题作文件夹名（可用 `--name` 覆盖），再按既有流程下载 PDF + MinerU
 
 ```bash
-bash paperdown2md/scripts/run.sh \
-  -o "<输出目录>" \
+# 公众号
+bash paperdown2md/scripts/run.sh -o "<输出目录>" \
   "https://mp.weixin.qq.com/s/jMW2lbgiHDka8CASFtQ81w"
+
+# 小红书（保留完整分享 URL）
+bash paperdown2md/scripts/run.sh -o "<输出目录>" \
+  "https://www.xiaohongshu.com/explore/6a1c2d75000000000603739b?xsec_token=..."
 ```
 
 浏览器兜底前提：Chrome 已开启远程调试（`chrome://inspect/#remote-debugging`），且可运行：
@@ -113,7 +119,7 @@ bash paperdown2md/scripts/run.sh \
 node ~/.cursor/skills/web-access/scripts/check-deps.mjs
 ```
 
-Agent 若在无 CDP 的环境执行，可改用 Cursor **browser MCP** 打开公众号链接，提取 arXiv/DOI 后再把链接传给 `run.sh`。
+检索仍无结果时，Agent 可再用 `lr search`、[web-access](~/.cursor/skills/web-access/SKILL.md) 或 WebSearch 定位论文，把 arXiv/DOI 链接传给 `run.sh`。
 
 脚本搞不定时，再：
 
@@ -177,6 +183,8 @@ bash paperdown2md/scripts/run.sh -o "<输出目录>" \
 | `mineru-open-api: command not found` | 安装 MinerU CLI（mineru skill 安装脚本） |
 | OpenAlex 无 PDF | 换 arXiv 链接、`lr search`、或请用户提供 PDF |
 | 公众号「环境异常」 | 脚本会自动尝试 CDP 浏览器；仍失败则请用户完成验证或直传 arXiv/DOI |
+| 小红书笔记无法浏览 | 使用 App 分享的完整 URL（含 `xsec_token`）；或直传 arXiv/DOI |
+| 帖子无论文直链 | 脚本会用标题/关键词检索 OpenAlex + arXiv；仍失败再用 `lr search` / web-access |
 | extract 超时 | 增大 `--timeout` 或向用户说明重试 |
 | 用户只要 PDF 不要 Markdown | `paperdown2md.py --skip-extract` |
 
@@ -197,6 +205,14 @@ bash paperdown2md/scripts/run.sh \
 bash paperdown2md/scripts/run.sh \
   -o "paperdown2md/example" \
   "https://mp.weixin.qq.com/s/jMW2lbgiHDka8CASFtQ81w"
+```
+
+**从小红书帖子起步（无直链时自动检索 arXiv/OpenAlex）：**
+
+```bash
+bash paperdown2md/scripts/run.sh \
+  -o "paperdown2md/example" \
+  "https://www.xiaohongshu.com/explore/6a1c2d75000000000603739b?xsec_token=..."
 ```
 
 或使用已有 PDF 仅做 MinerU（需 PDF 已在文件夹内）：

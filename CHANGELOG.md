@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.0] — 2026-06-15
+
+### Added
+
+- **Xiaohongshu post URLs** (`xiaohongshu.com/explore/...`) as download entry points
+- **Literature search fallback** when social posts have no direct arXiv/DOI/PDF link (OpenAlex + arXiv API, with relevance filtering)
+- Unified social post resolver for WeChat and XHS; XHS prefers browser CDP; filters footer/noise in titles
+
 ## [1.1.0] — 2026-06-15
 
 ### Added

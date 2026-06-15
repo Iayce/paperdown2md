@@ -25,16 +25,34 @@ ARXIV_ID_RE = re.compile(
 )
 DOI_RE = re.compile(r"\b(10\.\d{4,9}/[^\s\]]+)\b", re.I)
 WEIXIN_URL_RE = re.compile(r"https?://mp\.weixin\.qq\.com/s/", re.I)
+XHS_URL_RE = re.compile(
+    r"https?://(?:www\.)?xiaohongshu\.com/(?:explore|discovery/item)/",
+    re.I,
+)
 OG_TITLE_RE = re.compile(
     r'property="og:title"\s+content="([^"]+)"|content="([^"]+)"\s+property="og:title"',
     re.I,
 )
 PAPER_HOST_RE = re.compile(
+    r"(arxiv\.org|doi\.org|biorxiv\.org|medrxiv\.org)",
+    re.I,
+)
+DIRECT_PDF_HOST_RE = re.compile(
     r"(arxiv\.org|doi\.org|biorxiv\.org|medrxiv\.org|\.pdf(?:\?|#|$))",
     re.I,
 )
+EXCLUDED_PAPER_HOSTS = (
+    "beian.cac.gov.cn",
+    "xhscdn.com",
+    "fe-video-qc.xhscdn.com",
+    "dc.xhscdn.com",
+)
+SOCIAL_TITLE_PREFIX_RE = re.compile(
+    r"^(?:bioRxiv|arXiv|medRxiv|Nature|Science|Cell)\s*[｜|:]\s*",
+    re.I,
+)
 INVALID_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-WEIXIN_UA = (
+BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
@@ -158,13 +176,43 @@ def pick_pdf_url(work: dict) -> tuple[str | None, str | None]:
     return None, title
 
 
+def openalex_search_works(query: str, per_page: int = 5) -> list[dict]:
+    q = urllib.parse.quote(query)
+    try:
+        data = http_get_json(
+            f"https://api.openalex.org/works?search={q}&per_page={per_page}"
+        )
+        return data.get("results") or []
+    except (urllib.error.URLError, json.JSONDecodeError):
+        return []
+
+
 def is_weixin_url(source: str) -> bool:
     return bool(WEIXIN_URL_RE.search(source)) or (
         "mp.weixin.qq.com" in source and "/s/" in source
     )
 
 
-def normalize_weixin_html(html: str) -> str:
+def is_xhs_url(source: str) -> bool:
+    return bool(XHS_URL_RE.search(source)) or (
+        "xiaohongshu.com" in source
+        and ("/explore/" in source or "/discovery/item/" in source)
+    )
+
+
+def is_social_url(source: str) -> bool:
+    return is_weixin_url(source) or is_xhs_url(source)
+
+
+def social_platform(source: str) -> str:
+    if is_xhs_url(source):
+        return "xhs"
+    if is_weixin_url(source):
+        return "weixin"
+    return "unknown"
+
+
+def normalize_social_html(html: str) -> str:
     return (
         html.replace("\\x3c", "<")
         .replace("\\x3e", ">")
@@ -173,21 +221,90 @@ def normalize_weixin_html(html: str) -> str:
     )
 
 
-def extract_weixin_title(html: str) -> str | None:
+def is_excluded_paper_url(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return any(excl in host for excl in EXCLUDED_PAPER_HOSTS)
+
+
+def extract_og_title(html: str) -> str | None:
     m = OG_TITLE_RE.search(html)
     if not m:
         return None
     return (m.group(1) or m.group(2) or "").strip() or None
 
 
+def clean_social_title(title: str) -> str:
+    title = re.sub(r"\s*-\s*小红书\s*$", "", title.strip())
+    title = SOCIAL_TITLE_PREFIX_RE.sub("", title)
+    return title.strip()
+
+
+def is_footer_line(text: str) -> bool:
+    markers = (
+        "有限公司",
+        "沪ICP",
+        "ICP备",
+        "举报电话",
+        "营业执照",
+        "地址：",
+        "电话：",
+        "关于我们",
+        "行吟信息",
+        "个性化推荐算法",
+        "医疗器械",
+    )
+    return any(m in text for m in markers)
+
+
+def extract_title_from_xhs_body(body: str) -> str | None:
+    candidates: list[tuple[int, int, str]] = []
+    for line in body.splitlines():
+        line = line.strip()
+        if len(line) < 8 or is_footer_line(line):
+            continue
+        if line in {"关注", "首页", "消息", "我", "更多", "关于我们", "推荐", "直播", "发布"}:
+            continue
+        score = 0
+        if re.search(r"bioRxiv|arXiv|medRxiv|论文|微调|预测|design|affinity", line, re.I):
+            score += 10
+        if "｜" in line or "|" in line:
+            score += 5
+        candidates.append((score, len(line), line))
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return clean_social_title(candidates[0][2])
+
+
+def extract_social_title(
+    html: str,
+    body: str | None = None,
+    page_title: str | None = None,
+) -> str | None:
+    for candidate in (page_title, extract_og_title(html)):
+        if not candidate or candidate in ("小红书", "小红书 - 你的生活兴趣社区"):
+            continue
+        cleaned = clean_social_title(candidate)
+        if cleaned and "页面不见了" not in cleaned and not is_footer_line(cleaned):
+            if len(cleaned) >= 8 or re.search(r"bioRxiv|arXiv|论文", cleaned, re.I):
+                return cleaned
+    if body:
+        xhs_title = extract_title_from_xhs_body(body)
+        if xhs_title:
+            return xhs_title
+    return None
+
+
 def extract_paper_urls_from_html(html: str) -> list[str]:
-    html = normalize_weixin_html(html)
+    html = normalize_social_html(html)
     raw_urls = re.findall(r"https?://[^\s\"'<>\\]+", html)
     seen: set[str] = set()
     paper_urls: list[str] = []
     for raw in raw_urls:
         url = raw.rstrip(".,;)]}>\"'\\")
-        if not PAPER_HOST_RE.search(url):
+        if is_excluded_paper_url(url):
+            continue
+        if not DIRECT_PDF_HOST_RE.search(url):
             continue
         if url in seen:
             continue
@@ -196,14 +313,169 @@ def extract_paper_urls_from_html(html: str) -> list[str]:
     return paper_urls
 
 
+def extract_paper_refs_from_text(text: str) -> list[str]:
+    refs: list[str] = []
+    seen: set[str] = set()
+
+    def add(ref: str) -> None:
+        if ref not in seen:
+            seen.add(ref)
+            refs.append(ref)
+
+    for m in ARXIV_ID_RE.finditer(text):
+        add(arxiv_pdf_url(m.group(1)))
+    for m in DOI_RE.finditer(text):
+        add(f"https://doi.org/{m.group(1)}")
+    for m in re.finditer(
+        r"https?://(?:www\.)?(?:arxiv\.org/\S+|doi\.org/\S+|biorxiv\.org/\S+|medrxiv\.org/\S+)",
+        text,
+        re.I,
+    ):
+        url = m.group(0).rstrip(".,;)]}>\"'")
+        if not is_excluded_paper_url(url):
+            add(url)
+    return refs
+
+
+def collect_paper_refs(html: str, body: str | None = None) -> list[str]:
+    refs = extract_paper_urls_from_html(html)
+    refs.extend(extract_paper_refs_from_text(body or ""))
+    refs.extend(extract_paper_refs_from_text(html))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for ref in refs:
+        if ref not in seen:
+            seen.add(ref)
+            unique.append(ref)
+    return unique
+
+
+def build_literature_search_queries(title: str | None, body: str | None) -> list[str]:
+    queries: list[str] = []
+    seen: set[str] = set()
+
+    def add(q: str) -> None:
+        q = re.sub(r"\s+", " ", q.strip(" -|｜:"))
+        if len(q) < 8 or q in seen or is_footer_line(q):
+            return
+        seen.add(q)
+        queries.append(q)
+
+    text = body or ""
+    if text:
+        for m in re.finditer(r"\b([A-Z][A-Za-z0-9]*-\d+[A-Za-z0-9]*)\b", text):
+            name = m.group(1)
+            if re.search(r"affinity|fine[- ]?tun", text, re.I):
+                add(f"{name} affinity fine-tuning")
+            add(name)
+
+    if title and not is_footer_line(title):
+        add(clean_social_title(title))
+
+    return queries[:6]
+
+
+def arxiv_search_works(query: str, max_results: int = 5) -> list[tuple[str, str]]:
+    q = urllib.parse.quote_plus(query)
+    url = (
+        f"http://export.arxiv.org/api/query?search_query=all:{q}"
+        f"&start=0&max_results={max_results}"
+    )
+    try:
+        xml = http_get_text(url, timeout=60)
+    except urllib.error.URLError:
+        return []
+
+    works: list[tuple[str, str]] = []
+    for block in re.split(r"(?=<entry>)", xml):
+        if "<entry>" not in block:
+            continue
+        title_m = re.search(r"<title>\s*([^<]+?)\s*</title>", block)
+        id_m = re.search(r"<id>https?://arxiv\.org/abs/([^<]+)</id>", block)
+        if not title_m or not id_m:
+            continue
+        arxiv_id = id_m.group(1).strip()
+        title = re.sub(r"\s+", " ", title_m.group(1).strip())
+        works.append((arxiv_pdf_url(arxiv_id), title))
+    return works
+
+
+def is_relevant_match(query: str, title: str) -> bool:
+    title_l = title.lower()
+    required = [
+        t
+        for t in re.findall(r"[A-Za-z0-9][A-Za-z0-9-]*", query)
+        if re.search(r"[-\d]", t) and len(t) >= 3
+    ]
+    if required:
+        return any(t.lower() in title_l for t in required)
+    words = [w for w in re.findall(r"[A-Za-z]{4,}", query)]
+    if not words:
+        return True
+    return sum(1 for w in words if w.lower() in title_l) >= max(1, len(words) // 2)
+
+
+def resolve_via_literature_search(
+    queries: list[str],
+    display_title: str | None,
+) -> tuple[str, str]:
+    if not queries:
+        raise ValueError("No search queries built from social post content")
+
+    for q in queries:
+        prefer_arxiv = bool(re.search(r"[A-Za-z]+-\d+", q))
+        engines: tuple[str, ...] = ("arxiv", "openalex") if prefer_arxiv else ("openalex", "arxiv")
+
+        for engine in engines:
+            if engine == "arxiv":
+                print(f"[paperdown2md] Literature search (arXiv): {q!r}")
+                for pdf, title in arxiv_search_works(q):
+                    if is_relevant_match(q, title):
+                        print(f"[paperdown2md] Matched paper: {title}")
+                        return pdf, display_title or title or q
+            else:
+                print(f"[paperdown2md] Literature search (OpenAlex): {q!r}")
+                for work in openalex_search_works(q):
+                    pdf, title = pick_pdf_url(work)
+                    if pdf and is_relevant_match(q, title or ""):
+                        print(f"[paperdown2md] Matched paper: {title}")
+                        return pdf, display_title or title or q
+
+    joined = "; ".join(queries[:3])
+    raise ValueError(
+        f"Literature search found no open PDF for queries: {joined}. "
+        "Try passing arXiv/DOI directly, or use lr search / web-access."
+    )
+
+
 def weixin_page_blocked(html: str) -> bool:
     return "环境异常" in html and len(html) < 100_000
 
 
-def weixin_page_usable(html: str) -> bool:
-    if weixin_page_blocked(html):
+def xhs_page_blocked(html: str, page_title: str | None = None) -> bool:
+    markers = ("页面不见了", "暂时无法浏览", "当前笔记暂时无法浏览")
+    if page_title and any(m in page_title for m in markers):
+        return True
+    return any(m in html for m in markers) and len(html) < 200_000
+
+
+def social_page_usable(
+    html: str,
+    *,
+    platform: str,
+    body: str | None = None,
+    page_title: str | None = None,
+) -> bool:
+    if platform == "weixin" and weixin_page_blocked(html):
         return False
-    return bool(extract_paper_urls_from_html(html))
+    if platform == "xhs" and xhs_page_blocked(html, page_title):
+        return False
+    if collect_paper_refs(html, body):
+        return True
+    if platform == "xhs":
+        title = extract_social_title(html, body, page_title)
+        return bool(title and body and len(body) > 200)
+    return False
 
 
 def cdp_proxy_base() -> str:
@@ -255,8 +527,8 @@ def cdp_request_json(
         return json.loads(resp.read().decode("utf-8"))
 
 
-def fetch_weixin_html_browser(url: str) -> str:
-    """Fetch WeChat article HTML via Chrome CDP (web-access proxy)."""
+def fetch_page_browser(url: str, *, need_body: bool = False) -> tuple[str, str | None, str | None]:
+    """Fetch page via Chrome CDP. Returns (html, page_title, body_text)."""
     base = ensure_cdp_proxy()
     if not base:
         raise ValueError(
@@ -281,6 +553,26 @@ def fetch_weixin_html_browser(url: str) -> str:
         except (urllib.error.URLError, TimeoutError, OSError):
             pass
 
+        title_result = cdp_request_json(
+            f"{base}/eval?target={target_id}",
+            data=b"document.title",
+            method="POST",
+            timeout=60,
+        )
+        page_title = title_result.get("value")
+        page_title = page_title if isinstance(page_title, str) else None
+
+        body_text: str | None = None
+        if need_body:
+            body_result = cdp_request_json(
+                f"{base}/eval?target={target_id}",
+                data=b"document.body.innerText",
+                method="POST",
+                timeout=60,
+            )
+            body_val = body_result.get("value")
+            body_text = body_val if isinstance(body_val, str) else None
+
         result = cdp_request_json(
             f"{base}/eval?target={target_id}",
             data=b"document.documentElement.outerHTML",
@@ -289,8 +581,8 @@ def fetch_weixin_html_browser(url: str) -> str:
         )
         html = result.get("value") or ""
         if not isinstance(html, str) or not html.strip():
-            raise ValueError("Browser returned empty HTML from WeChat page")
-        return html
+            raise ValueError("Browser returned empty HTML")
+        return html, page_title, body_text
     finally:
         try:
             urllib.request.urlopen(f"{base}/close?target={target_id}", timeout=5)
@@ -298,64 +590,89 @@ def fetch_weixin_html_browser(url: str) -> str:
             pass
 
 
-def fetch_weixin_html(url: str) -> str:
-    """HTTP first; fall back to browser CDP when blocked or missing paper links."""
+def fetch_social_page(url: str, platform: str) -> tuple[str, str | None, str | None]:
+    """HTTP first (WeChat); XHS prefers browser. Returns (html, page_title, body_text)."""
     html: str | None = None
+    page_title: str | None = None
+    body_text: str | None = None
     curl_error: Exception | None = None
 
-    try:
-        html = http_get_text(url, timeout=120, user_agent=WEIXIN_UA)
-    except urllib.error.URLError as e:
-        curl_error = e
+    if platform != "xhs":
+        try:
+            html = http_get_text(url, timeout=120, user_agent=BROWSER_UA)
+        except urllib.error.URLError as e:
+            curl_error = e
 
-    if html and weixin_page_usable(html):
-        print("[paperdown2md] WeChat article fetched via HTTP")
-        return html
+        if html and social_page_usable(html, platform=platform):
+            print(f"[paperdown2md] {platform} post fetched via HTTP")
+            return html, extract_og_title(html), None
 
-    if html and weixin_page_blocked(html):
+    if html and platform == "weixin" and weixin_page_blocked(html):
         reason = "verification required (环境异常)"
+    elif html and platform == "weixin":
+        reason = "no paper links in HTTP response"
+    elif platform == "xhs":
+        reason = "XHS requires browser for note content"
     elif html:
-        reason = "no arXiv/DOI/PDF links in HTTP response"
+        reason = "content insufficient in HTTP response"
     else:
         reason = f"HTTP failed ({curl_error})"
 
     print(f"[paperdown2md] HTTP insufficient ({reason}); trying browser (CDP)…")
-    browser_html = fetch_weixin_html_browser(url)
+    html, page_title, body_text = fetch_page_browser(
+        url,
+        need_body=(platform == "xhs"),
+    )
 
-    if weixin_page_blocked(browser_html):
+    if platform == "weixin" and weixin_page_blocked(html):
         raise ValueError(
             "WeChat page still blocked after browser fetch. "
             "Complete verification in Chrome, or pass the arXiv/DOI link directly."
         )
-    if not weixin_page_usable(browser_html):
-        title = extract_weixin_title(browser_html)
+    if platform == "xhs" and xhs_page_blocked(html, page_title):
+        raise ValueError(
+            "XHS note unavailable (missing xsec_token or login required). "
+            "Use the full share link from the app, or pass arXiv/DOI directly."
+        )
+    if not social_page_usable(
+        html,
+        platform=platform,
+        body=body_text,
+        page_title=page_title,
+    ):
+        title = extract_social_title(html, body_text, page_title)
         hint = f" Title: {title!r}." if title else ""
         raise ValueError(
-            f"No arXiv/DOI/PDF link found in WeChat article via browser.{hint} "
-            "Paste the paper link directly if the article only links GitHub or a project page."
+            f"Could not extract usable content from {platform} post via browser.{hint}"
         )
 
-    print("[paperdown2md] WeChat article fetched via browser (CDP)")
-    return browser_html
+    print(f"[paperdown2md] {platform} post fetched via browser (CDP)")
+    return html, page_title, body_text
 
 
-def resolve_weixin_article(url: str) -> tuple[str, str]:
-    """Fetch WeChat article, extract first arXiv/DOI/PDF link, return (pdf_url, title)."""
-    print(f"[paperdown2md] Resolving WeChat article: {url}")
-    html = fetch_weixin_html(url)
+def resolve_social_article(url: str) -> tuple[str, str]:
+    """Resolve WeChat / XHS post → (pdf_url, folder_title)."""
+    platform = social_platform(url)
+    label = "WeChat" if platform == "weixin" else "XHS"
+    print(f"[paperdown2md] Resolving {label} post: {url}")
 
-    title = extract_weixin_title(html)
-    paper_urls = extract_paper_urls_from_html(html)
-    if not paper_urls:
-        hint = f" Title: {title!r}." if title else ""
-        raise ValueError(
-            f"No arXiv/DOI/PDF link found in WeChat article.{hint} "
-            "Paste the paper link directly if the article only links GitHub or a project page."
-        )
+    html, page_title, body_text = fetch_social_page(url, platform)
+    title = extract_social_title(html, body_text, page_title)
+    paper_refs = collect_paper_refs(html, body_text)
 
-    print(f"[paperdown2md] Found {len(paper_urls)} paper link(s); using: {paper_urls[0]}")
-    pdf_url, _ = resolve_paper_source(paper_urls[0])
-    return pdf_url, title or _
+    if paper_refs:
+        print(f"[paperdown2md] Found {len(paper_refs)} paper ref(s); using: {paper_refs[0]}")
+        pdf_url, resolved_title = resolve_paper_source(paper_refs[0])
+        return pdf_url, title or resolved_title
+
+    queries = build_literature_search_queries(title, body_text)
+    if not queries and title:
+        queries = [title]
+    print(
+        f"[paperdown2md] No direct paper link in {label} post; "
+        "searching literature by title/keywords…"
+    )
+    return resolve_via_literature_search(queries, title)
 
 
 def resolve_paper_source(source: str) -> tuple[str, str]:
@@ -395,10 +712,10 @@ def resolve_paper_source(source: str) -> tuple[str, str]:
 
 
 def resolve_source(source: str) -> tuple[str, str]:
-    """Return (pdf_url, suggested_title). Supports WeChat article URLs as entry points."""
+    """Return (pdf_url, suggested_title). Supports social post URLs as entry points."""
     source = source.strip()
-    if is_weixin_url(source):
-        return resolve_weixin_article(source)
+    if is_social_url(source):
+        return resolve_social_article(source)
     return resolve_paper_source(source)
 
 
@@ -501,7 +818,7 @@ def main() -> int:
     parser.add_argument(
         "sources",
         nargs="+",
-        help="arXiv URL/ID, DOI, direct PDF URL, WeChat article URL, or paper title (OpenAlex)",
+        help="arXiv/DOI/PDF URL, WeChat/XHS post URL, or paper title (OpenAlex)",
     )
     parser.add_argument(
         "-o",
