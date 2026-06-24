@@ -230,6 +230,20 @@ mineru-open-api extract "paperdown2md/example/CIDD.../CIDD....pdf" \
 - **lightread-cli**：LightRead 资料库、笔记、综述 → 不是本地 paperdown2md 目录结构
 - **web-access**：网页检索、非结构化下载
 - **paperdown2md（本 skill）**：本地目录 + PDF + full.md + images 一条龙
+- **aiforbio-paper-reading**（下游）：在 `full.md` + `images/` 就绪后，于**同一论文目录**写 `{ModelName}record.md` 生物医学精读（公式逐元素推导 + 样本数据流）。见 [aiforbio-paper-reading](https://github.com/Iayce/aiforbio-paper-reading)
+
+## 与 aiforbio-paper-reading 联动（推荐流水线）
+
+本 skill 负责**获取与转换**；精读记录交给 **aiforbio-paper-reading**：
+
+```text
+paperdown2md  -o <文献目录> "<标识>"
+    →  <文献目录>/<论文名>/{pdf, full.md, images/}
+aiforbio-paper-reading
+    →  <文献目录>/<论文名>/{ModelName}record.md
+```
+
+`full.md` + `images/` 生成后，若用户要「读论文 / 写 record / 精读 / 公式推导 / 数据流示例」，**提醒并衔接 aiforbio-paper-reading**，勿在本 skill 内写长篇阅读笔记。
 
 ## 脚本说明
 

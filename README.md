@@ -4,11 +4,11 @@
 
 Resolve arXiv / DOI / PDF URL / WeChat or Xiaohongshu post URL / English title → download PDF → MinerU `extract` (Token) → `full.md` + `images/` per paper folder.
 
+**Downstream**: use [aiforbio-paper-reading](https://github.com/Iayce/aiforbio-paper-reading) on the same folder for structured AI-for-Bio reading notes (`{ModelName}record.md`).
+
 Discoverable on [SkillsMP](https://skillsmp.com/search?q=paperdown2md) (indexed from this GitHub repo).
 
 ## Install
-
-### Cursor (recommended)
 
 ```bash
 git clone https://github.com/Iayce/paperdown2md.git ~/.cursor/skills/paperdown2md
@@ -18,6 +18,15 @@ Or symlink a local checkout:
 
 ```bash
 ln -s /path/to/paperdown2md ~/.cursor/skills/paperdown2md
+```
+
+## Pipeline with aiforbio-paper-reading
+
+```bash
+# 1) This skill
+bash ~/.cursor/skills/paperdown2md/scripts/run.sh -o "./papers" --name "HE2RNA" "<identifier>"
+
+# 2) Agent invokes aiforbio-paper-reading → ./papers/HE2RNA/HE2RNArecord.md
 ```
 
 ### Dependencies
@@ -108,6 +117,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## 中文简介
 
-paperdown2md 是一个 **Agent Skill**（根目录 `SKILL.md`），面向 **Cursor**、**Claude Code** 等 Agent：把 arXiv / DOI / PDF 链接 / 微信公众号 / 小红书帖子 / 英文标题解析成 PDF，再用 MinerU Token 版 `extract` 生成 `full.md` 与 `images/`，每篇论文独立文件夹。社交媒体帖子在 HTTP 被拦时会自动尝试 Chrome CDP；无直链时会用 OpenAlex + arXiv API 检索论文。Token 仅本地配置，勿提交到仓库。
+paperdown2md 是一个 **Agent Skill**（根目录 `SKILL.md`），面向 **Cursor**、**Claude Code** 等 Agent：把 arXiv / DOI / PDF 链接 / 微信公众号 / 小红书帖子 / 英文标题解析成 PDF，再用 MinerU Token 版 `extract` 生成 `full.md` 与 `images/`，每篇论文独立文件夹。**下游**可衔接 [aiforbio-paper-reading](https://github.com/Iayce/aiforbio-paper-reading) 写生物医学精读 record。
 
 安装：`git clone https://github.com/Iayce/paperdown2md.git ~/.cursor/skills/paperdown2md`
