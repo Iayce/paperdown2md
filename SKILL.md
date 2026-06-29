@@ -8,11 +8,12 @@ description: >-
   即使用户没有明确说「paperdown2md」。
 compatibility: >-
   需要 mineru-open-api CLI 与 MinerU Token（~/.cursor/skills/mineru/key 或
-  MINERU_TOKEN）。可选 lr（LightRead CLI）辅助检索。本 skill 的 Python **必须**
+  MINERU_TOKEN）。可选 lr（LightRead CLI）辅助检索。OpenAlex 无直链 PDF 时自动查 PMC
+  镜像并用 Chrome CDP 浏览器兜底（依赖 web-access skill）。本 skill 的 Python **必须**
   在 skillsplace conda 环境中运行（macOS:
   /Users/jaycexu/anaconda3/envs/skillsplace；Windows: D:\Anaconda\envs\skillsplace；
   jumphost-inner: ~/xsjenv/miniconda3/envs/skillsplace）。禁止用系统 python3。
-version: 1.2.0
+version: 1.3.0
 ---
 
 # paperdown2md — 论文 PDF 下载 + MinerU 转 Markdown
@@ -93,6 +94,42 @@ bash paperdown2md/scripts/run.sh \
 - **微信公众号文章**：`https://mp.weixin.qq.com/s/...`
 - **小红书帖子**：`https://www.xiaohongshu.com/explore/...`（建议保留分享链接中的 `xsec_token` 等参数）
 - 英文标题：脚本经 OpenAlex 搜索并取最佳开放获取 PDF
+- **PMC 文章**：`https://www.ncbi.nlm.nih.gov/pmc/articles/PMC11200022/` 或 Europe PMC `?pdf=render` 链接
+- **出版商落地页**（Wiley / Springer / Nature 等 DOI 链接）：HTTP 失败时自动走浏览器
+
+#### 浏览器控制（web-access CDP，v1.3+）
+
+除公众号/小红书外，**出版商反爬、OA 无直链 PDF、机构订阅** 也会自动走 Chrome CDP（复用你已登录的 Chrome 会话与 Cookie）。
+
+**一次性配置**（每台机器）：
+
+1. 安装 [web-access](~/.cursor/skills/web-access/SKILL.md) skill（若尚未安装）：
+   ```bash
+   git clone https://github.com/eze-is/web-access.git ~/.cursor/skills/web-access
+   ```
+2. 在 Chrome 地址栏打开 `chrome://inspect/#remote-debugging`，勾选 **Allow remote debugging for this browser instance**（必要时重启 Chrome）。
+3. 验证依赖与 CDP Proxy：
+   ```bash
+   node ~/.cursor/skills/web-access/scripts/check-deps.mjs
+   ```
+   期望输出含 `node: ok`、`chrome: ok`、`proxy: ready`。
+4. （可选）自定义 Proxy 地址：`export CDP_PROXY_URL=http://127.0.0.1:3456`
+
+**PDF 下载兜底顺序**（脚本自动，无需手选）：
+
+1. OpenAlex / arXiv 直链 PDF → HTTP
+2. **PMC 镜像**（Europe PMC `?pdf=render`）→ HTTP（较慢但稳定，适用于 Wiley OA 等）
+3. **出版商落地页** → 浏览器解析 PDF 链接 → HTTP
+4. **浏览器 session fetch**（`credentials: include`）→ 使用 Chrome 已登录的机构账号 Cookie 拉 PDF
+
+**机构订阅 / 已登录账号**：在 Chrome 中先登录学校 VPN 或机构 Shibboleth（如 Wiley、Springer、ScienceDirect），再跑 `run.sh`。浏览器兜底会复用该 Chrome 实例的 Cookie，**无需在脚本里填账号密码**。若仍失败，请在 Chrome 手动打开 DOI 确认能下载 PDF。
+
+禁用浏览器兜底（仅 HTTP / PMC）：
+
+```bash
+bash paperdown2md/scripts/run.sh --no-browser -o "<输出目录>" "<标识>"
+# 或 export PAPERDOWN2MD_NO_BROWSER=1
+```
 
 #### 社交媒体帖子（公众号 / 小红书，v1.1+）
 
@@ -118,6 +155,8 @@ bash paperdown2md/scripts/run.sh -o "<输出目录>" \
 ```bash
 node ~/.cursor/skills/web-access/scripts/check-deps.mjs
 ```
+
+出版商 / OA 无直链时同样走上述 CDP；详见 **浏览器控制** 一节。
 
 检索仍无结果时，Agent 可再用 `lr search`、[web-access](~/.cursor/skills/web-access/SKILL.md) 或 WebSearch 定位论文，把 arXiv/DOI 链接传给 `run.sh`。
 
@@ -181,7 +220,10 @@ bash paperdown2md/scripts/run.sh -o "<输出目录>" \
 |------|------|
 | `no API token found` | 配置 MinerU Token，见 [mineru](~/.cursor/skills/mineru/SKILL.md) |
 | `mineru-open-api: command not found` | 安装 MinerU CLI（mineru skill 安装脚本） |
-| OpenAlex 无 PDF | 换 arXiv 链接、`lr search`、或请用户提供 PDF |
+| OpenAlex 无 PDF | 脚本自动查 PMC 镜像 + 浏览器兜底；或换 arXiv/DOI 直链 |
+| Wiley/Springer 403 | 确保 Chrome 已开 remote debugging；OA 论文走 Europe PMC；机构论文先在 Chrome 登录 |
+| 机构订阅仍失败 | 在 Chrome 手动验证 DOI 可下载；或 `--skip-extract` 后手动放入 PDF |
+| 不想用浏览器 | `--no-browser` 或 `PAPERDOWN2MD_NO_BROWSER=1` |
 | 公众号「环境异常」 | 脚本会自动尝试 CDP 浏览器；仍失败则请用户完成验证或直传 arXiv/DOI |
 | 小红书笔记无法浏览 | 使用 App 分享的完整 URL（含 `xsec_token`）；或直传 arXiv/DOI |
 | 帖子无论文直链 | 脚本会用标题/关键词检索 OpenAlex + arXiv；仍失败再用 `lr search` / web-access |
@@ -197,6 +239,17 @@ bash paperdown2md/scripts/run.sh \
   -o "paperdown2md/example" \
   --name "CIDD: Collaborative Intelligence for Structure-Based Drug Design Empowered by LLMs" \
   "CIDD Collaborative Intelligence Structure-Based Drug Design LLMs"
+```
+
+**OA 论文无直链（DIMOND / Wiley + PMC 镜像，v1.3+）：**
+
+```bash
+bash paperdown2md/scripts/run.sh \
+  -o "paperdown2md/example" \
+  --name "DIMOND" \
+  --skip-extract \
+  "DIMOND: DIffusion model OptimizatioN with deep learning"
+# 或 DOI: 10.1002/advs.202307965
 ```
 
 **从微信公众号文章起步（HTTP 失败时自动走浏览器 CDP）：**
@@ -228,7 +281,7 @@ mineru-open-api extract "paperdown2md/example/CIDD.../CIDD....pdf" \
 
 - **mineru**：只转已有 PDF/文件 → 读 mineru skill
 - **lightread-cli**：LightRead 资料库、笔记、综述 → 不是本地 paperdown2md 目录结构
-- **web-access**：网页检索、非结构化下载
+- **web-access**：Chrome CDP Proxy（`localhost:3456`）；出版商反爬、机构 Cookie、公众号/小红书
 - **paperdown2md（本 skill）**：本地目录 + PDF + full.md + images 一条龙
 - **aiforbio-paper-reading**（下游）：在 `full.md` + `images/` 就绪后，于**同一论文目录**写 `{ModelName}record.md` 生物医学精读（公式逐元素推导 + 样本数据流）。见 [aiforbio-paper-reading](https://github.com/Iayce/aiforbio-paper-reading)
 

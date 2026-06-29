@@ -30,6 +30,11 @@
       "prompt": "这篇小红书笔记讲的论文帮我下载转 md：https://www.xiaohongshu.com/explore/6a1c2d75000000000603739b?xsec_token=...，放到 ~/papers/boltz2/",
       "expected_output": "~/papers/boltz2/<笔记标题>/ 下有 PDF、full.md、images/；无直链时通过 arXiv/OpenAlex 检索匹配",
       "files": []
+    {
+      "id": 6,
+      "prompt": "帮我把 DIMOND: DIffusion model OptimizatioN with deep learning 这篇 Wiley OA 论文下载到 paperdown2md/example/DIMOND，先不要 mineru",
+      "expected_output": "example/DIMOND/ 下有有效 PDF（非 HTML）；OpenAlex 无直链时走 Europe PMC 镜像",
+      "files": []
     }
   ]
 }

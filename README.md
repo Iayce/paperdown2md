@@ -37,7 +37,25 @@ bash ~/.cursor/skills/paperdown2md/scripts/run.sh -o "./papers" --name "HE2RNA" 
 | **mineru-open-api** CLI | MinerU Open API client |
 | **MinerU Token** | `MINERU_TOKEN` env var or `~/.cursor/skills/mineru/key` — **never commit tokens** |
 
-Optional: [LightRead CLI](https://github.com) (`lr`) for title search fallback; [web-access](https://github.com/eze-is/web-access) CDP proxy for WeChat articles when HTTP is blocked.
+Optional: [LightRead CLI](https://github.com) (`lr`) for title search fallback; [web-access](https://github.com/eze-is/web-access) CDP proxy for anti-bot pages, publisher PDFs, and institutional login cookies.
+
+### Browser / CDP setup (v1.3+)
+
+Required when OpenAlex has no direct PDF, publisher HTTP returns 403, or you need institutional subscription access via an already-logged-in Chrome profile:
+
+```bash
+# 1) Install web-access
+git clone https://github.com/eze-is/web-access.git ~/.cursor/skills/web-access
+
+# 2) Enable Chrome remote debugging: chrome://inspect/#remote-debugging
+
+# 3) Verify
+node ~/.cursor/skills/web-access/scripts/check-deps.mjs
+```
+
+Download fallback order: OpenAlex/arXiv direct PDF → Europe PMC mirror → browser resolves publisher PDF link → browser fetch with session cookies.
+
+Disable browser: `--no-browser` or `PAPERDOWN2MD_NO_BROWSER=1`.
 
 ### Social post URLs (WeChat / Xiaohongshu, v1.2+)
 

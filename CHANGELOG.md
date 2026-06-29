@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.0] — 2026-06-29
+
+### Added
+
+- **PMC / Europe PMC mirror** when OpenAlex has no `pdf_url` (DOI → PMCID → `europepmc.org/...?pdf=render`)
+- **Publisher browser fallback**: resolve PDF links from Wiley/Springer/Nature/etc. landing pages via Chrome CDP
+- **Session-cookie PDF fetch** for institutional subscriptions (reuse logged-in Chrome profile)
+- PMC article URLs and Europe PMC render URLs as direct identifiers
+- `--no-browser` / `PAPERDOWN2MD_NO_BROWSER` to disable CDP download fallback
+- PDF validation (`%PDF-` magic bytes) after HTTP download; auto-retry on HTML anti-bot responses
+
 ## [1.2.0] — 2026-06-15
 
 ### Added

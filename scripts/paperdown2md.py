@@ -8,15 +8,18 @@ Stdlib only. 必须在 skillsplace conda 环境中运行；请用 scripts/run.sh
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 ARXIV_ID_RE = re.compile(
@@ -56,6 +59,48 @@ BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+PMC_ID_RE = re.compile(r"(?:PMC)?(\d{5,})", re.I)
+EUROPEPMC_RENDER_RE = re.compile(
+    r"europepmc\.org/articles/(PMC\d+)(?:\?pdf=render)?",
+    re.I,
+)
+PMC_ARTICLE_RE = re.compile(
+    r"(?:ncbi\.nlm\.nih\.gov|pmc\.ncbi\.nlm\.nih\.gov)/pmc/articles/(?:PMC)?(\d+)",
+    re.I,
+)
+PUBLISHER_PDF_HREF_RE = re.compile(
+    r"""href=["']([^"']*(?:/pdf(?:direct)?/|/pdf/|\.pdf(?:\?|#|$)|downloadpdf|/epdf/|citation-pdf)[^"']*)["']""",
+    re.I,
+)
+CITATION_PDF_META_RE = re.compile(
+    r'name="citation_pdf_url"\s+content="([^"]+)"|content="([^"]+)"\s+name="citation_pdf_url"',
+    re.I,
+)
+PUBLISHER_HOSTS = (
+    "onlinelibrary.wiley.com",
+    "link.springer.com",
+    "nature.com",
+    "sciencedirect.com",
+    "cell.com",
+    "acs.org",
+    "tandfonline.com",
+    "oup.com",
+    "cambridge.org",
+    "ieee.org",
+    "mdpi.com",
+    "frontiersin.org",
+)
+
+
+@dataclass
+class ResolvedPaper:
+    """Resolved download target for one paper."""
+
+    title: str
+    download_url: str | None = None
+    landing_url: str | None = None
+    pmc_fallback_url: str | None = None
+    work: dict | None = None
 
 # skillsplace 环境路径（与用户规则一致）
 SKILLSPLACE_MARKERS = (
@@ -117,6 +162,204 @@ def download_file(url: str, dest: Path, timeout: int = 300) -> None:
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as f:
         shutil.copyfileobj(resp, f)
+
+
+def is_pdf_file(path: Path, min_size: int = 1024) -> bool:
+    if not path.is_file() or path.stat().st_size < min_size:
+        return False
+    with path.open("rb") as f:
+        return f.read(5) == b"%PDF-"
+
+
+def extract_doi_from_work(work: dict) -> str | None:
+    doi = work.get("doi")
+    if isinstance(doi, str) and doi.startswith("https://doi.org/"):
+        return doi.removeprefix("https://doi.org/")
+    ids = work.get("ids") or {}
+    doi = ids.get("doi")
+    if isinstance(doi, str):
+        return doi.removeprefix("https://doi.org/")
+    return None
+
+
+def normalize_pmcid(raw: str) -> str | None:
+    m = PMC_ID_RE.search(raw)
+    if not m:
+        return None
+    return f"PMC{m.group(1)}"
+
+
+def extract_pmcid_from_work(work: dict) -> str | None:
+    for loc in work.get("locations") or []:
+        landing = loc.get("landing_page_url") or ""
+        source_name = ((loc.get("source") or {}).get("display_name") or "").lower()
+        if "pubmed central" in source_name or "pmc" in landing.lower():
+            m = PMC_ARTICLE_RE.search(landing)
+            if m:
+                return f"PMC{m.group(1)}"
+            pmcid = normalize_pmcid(landing)
+            if pmcid:
+                return pmcid
+    return None
+
+
+def lookup_pmcid_by_doi(doi: str) -> str | None:
+    q = urllib.parse.quote(doi, safe="")
+    try:
+        xml = http_get_text(
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+            f"?db=pubmed&term={q}[DOI]&retmode=json",
+            timeout=30,
+        )
+        data = json.loads(xml)
+        ids = (data.get("esearchresult") or {}).get("idlist") or []
+        if not ids:
+            return None
+        pmid = ids[0]
+        link_url = (
+            "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
+            f"?dbfrom=pubmed&id={pmid}&linkname=pubmed_pmc&retmode=json"
+        )
+        link_data = http_get_json(link_url, timeout=30)
+        for linkset in link_data.get("linksets") or []:
+            for ldb in linkset.get("linksetdbs") or []:
+                if ldb.get("linkname") == "pubmed_pmc":
+                    links = ldb.get("links") or []
+                    if links:
+                        return f"PMC{links[0]}"
+    except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError):
+        return None
+    return None
+
+
+def lookup_pmcid_from_europepmc(doi: str) -> str | None:
+    q = urllib.parse.quote(doi, safe="")
+    try:
+        data = http_get_json(
+            "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
+            f"?query=DOI:{q}&format=json&pageSize=1",
+            timeout=30,
+        )
+        results = (data.get("resultList") or {}).get("result") or []
+        if not results:
+            return None
+        pmcid = results[0].get("pmcid")
+        if isinstance(pmcid, str) and pmcid:
+            return pmcid if pmcid.upper().startswith("PMC") else f"PMC{pmcid}"
+    except (urllib.error.URLError, json.JSONDecodeError):
+        return None
+    return None
+
+
+def europepmc_render_url(pmcid: str) -> str:
+    pmcid = normalize_pmcid(pmcid) or pmcid
+    return f"https://europepmc.org/articles/{pmcid}?pdf=render"
+
+
+def resolve_pmc_fallback(work: dict) -> str | None:
+    pmcid = extract_pmcid_from_work(work)
+    doi = extract_doi_from_work(work)
+    if not pmcid and doi:
+        pmcid = lookup_pmcid_from_europepmc(doi) or lookup_pmcid_by_doi(doi)
+    if not pmcid:
+        return None
+    return europepmc_render_url(pmcid)
+
+
+def pick_publisher_landing(work: dict) -> str | None:
+    oa = (work.get("open_access") or {}).get("oa_url")
+    if isinstance(oa, str) and oa.startswith("http"):
+        return oa
+    loc = work.get("primary_location") or {}
+    landing = loc.get("landing_page_url")
+    if isinstance(landing, str) and landing.startswith("http"):
+        return landing
+    doi = extract_doi_from_work(work)
+    if doi:
+        return f"https://doi.org/{doi}"
+    return None
+
+
+def is_publisher_landing_url(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return any(p in host for p in PUBLISHER_HOSTS) or "doi.org" in host
+
+
+def is_known_pdf_endpoint(url: str) -> bool:
+    lower = url.lower()
+    if lower.endswith(".pdf"):
+        return True
+    if "europepmc.org" in lower and "pdf=render" in lower:
+        return True
+    if "arxiv.org/pdf/" in lower:
+        return True
+    return False
+
+
+def absolutize_url(base: str, href: str) -> str:
+    return urllib.parse.urljoin(base, href)
+
+
+def score_publisher_pdf_url(url: str) -> int:
+    lower = url.lower()
+    score = 0
+    if lower.endswith(".pdf"):
+        score += 10
+    if "/pdfdirect/" in lower or "/pdf/" in lower:
+        score += 8
+    if "download" in lower:
+        score += 4
+    if "supp" in lower or "supporting" in lower:
+        score -= 6
+    return score
+
+
+def extract_pdf_urls_from_html(html: str, base_url: str) -> list[str]:
+    seen: set[str] = set()
+    urls: list[tuple[int, str]] = []
+
+    def add(raw: str) -> None:
+        url = absolutize_url(base_url, raw.strip())
+        if url in seen:
+            return
+        seen.add(url)
+        if not re.search(r"pdf|download", url, re.I):
+            return
+        urls.append((score_publisher_pdf_url(url), url))
+
+    for m in CITATION_PDF_META_RE.finditer(html):
+        add(m.group(1) or m.group(2) or "")
+    for m in PUBLISHER_PDF_HREF_RE.finditer(html):
+        add(m.group(1))
+    for m in re.finditer(r'href="([^"]+\.pdf[^"]*)"', html, re.I):
+        add(m.group(1))
+
+    urls.sort(key=lambda item: item[0], reverse=True)
+    return [u for _, u in urls]
+
+
+def try_http_pdf(
+    url: str,
+    dest: Path,
+    *,
+    timeout: int = 300,
+    referer: str | None = None,
+) -> bool:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    headers = {"User-Agent": BROWSER_UA}
+    if referer:
+        headers["Referer"] = referer
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp, dest.open("wb") as f:
+            shutil.copyfileobj(resp, f)
+    except urllib.error.URLError:
+        return False
+    if is_pdf_file(dest):
+        return True
+    if dest.exists():
+        dest.unlink()
+    return False
 
 
 def parse_arxiv_id(source: str) -> str | None:
@@ -418,7 +661,7 @@ def is_relevant_match(query: str, title: str) -> bool:
 def resolve_via_literature_search(
     queries: list[str],
     display_title: str | None,
-) -> tuple[str, str]:
+) -> ResolvedPaper:
     if not queries:
         raise ValueError("No search queries built from social post content")
 
@@ -432,14 +675,20 @@ def resolve_via_literature_search(
                 for pdf, title in arxiv_search_works(q):
                     if is_relevant_match(q, title):
                         print(f"[paperdown2md] Matched paper: {title}")
-                        return pdf, display_title or title or q
+                        return ResolvedPaper(
+                            title=display_title or title or q,
+                            download_url=pdf,
+                        )
             else:
                 print(f"[paperdown2md] Literature search (OpenAlex): {q!r}")
                 for work in openalex_search_works(q):
-                    pdf, title = pick_pdf_url(work)
-                    if pdf and is_relevant_match(q, title or ""):
-                        print(f"[paperdown2md] Matched paper: {title}")
-                        return pdf, display_title or title or q
+                    try:
+                        resolved = resolve_from_openalex_work(work, display_title or q)
+                    except ValueError:
+                        continue
+                    if is_relevant_match(q, resolved.title):
+                        print(f"[paperdown2md] Matched paper: {resolved.title}")
+                        return resolved
 
     joined = "; ".join(queries[:3])
     raise ValueError(
@@ -553,41 +802,241 @@ def fetch_page_browser(url: str, *, need_body: bool = False) -> tuple[str, str |
         except (urllib.error.URLError, TimeoutError, OSError):
             pass
 
-        title_result = cdp_request_json(
-            f"{base}/eval?target={target_id}",
-            data=b"document.title",
-            method="POST",
-            timeout=60,
-        )
-        page_title = title_result.get("value")
-        page_title = page_title if isinstance(page_title, str) else None
-
-        body_text: str | None = None
-        if need_body:
-            body_result = cdp_request_json(
+        def read_page() -> tuple[str, str | None, str | None]:
+            title_result = cdp_request_json(
                 f"{base}/eval?target={target_id}",
-                data=b"document.body.innerText",
+                data=b"document.title",
                 method="POST",
                 timeout=60,
             )
-            body_val = body_result.get("value")
-            body_text = body_val if isinstance(body_val, str) else None
+            page_title = title_result.get("value")
+            page_title = page_title if isinstance(page_title, str) else None
 
-        result = cdp_request_json(
-            f"{base}/eval?target={target_id}",
-            data=b"document.documentElement.outerHTML",
-            method="POST",
-            timeout=120,
-        )
-        html = result.get("value") or ""
-        if not isinstance(html, str) or not html.strip():
-            raise ValueError("Browser returned empty HTML")
+            body_text: str | None = None
+            if need_body:
+                body_result = cdp_request_json(
+                    f"{base}/eval?target={target_id}",
+                    data=b"document.body.innerText",
+                    method="POST",
+                    timeout=60,
+                )
+                body_val = body_result.get("value")
+                body_text = body_val if isinstance(body_val, str) else None
+
+            result = cdp_request_json(
+                f"{base}/eval?target={target_id}",
+                data=b"document.documentElement.outerHTML",
+                method="POST",
+                timeout=120,
+            )
+            html = result.get("value") or ""
+            if not isinstance(html, str) or not html.strip():
+                raise ValueError("Browser returned empty HTML")
+            return html, page_title, body_text
+
+        html, page_title, body_text = read_page()
+        if len(html) < 500:
+            time.sleep(3)
+            html, page_title, body_text = read_page()
         return html, page_title, body_text
     finally:
         try:
             urllib.request.urlopen(f"{base}/close?target={target_id}", timeout=5)
         except (urllib.error.URLError, TimeoutError, OSError):
             pass
+
+
+def cdp_eval_on_page(
+    url: str,
+    expression: str,
+    *,
+    timeout: int = 120,
+    keep_open: bool = False,
+) -> tuple[dict, str | None]:
+    """Open URL in CDP tab, eval JS, optionally keep tab open. Returns (result, target_id)."""
+    base = ensure_cdp_proxy()
+    if not base:
+        raise ValueError("CDP proxy not available")
+
+    encoded = urllib.parse.quote(url, safe="")
+    tab = cdp_request_json(f"{base}/new?url={encoded}", timeout=timeout)
+    target_id = tab.get("targetId")
+    if not target_id:
+        raise ValueError(f"CDP /new returned no targetId: {tab}")
+
+    try:
+        result = cdp_request_json(
+            f"{base}/eval?target={target_id}",
+            data=expression.encode("utf-8"),
+            method="POST",
+            timeout=timeout,
+        )
+        value = result.get("value")
+        if isinstance(value, dict):
+            payload = value
+        elif result.get("error"):
+            raise ValueError(str(result.get("error")))
+        else:
+            payload = {"value": value}
+        if keep_open:
+            return payload, target_id
+        return payload, None
+    finally:
+        if not keep_open:
+            try:
+                urllib.request.urlopen(f"{base}/close?target={target_id}", timeout=5)
+            except (urllib.error.URLError, TimeoutError, OSError):
+                pass
+
+
+def cdp_eval_on_target(target_id: str, expression: str, *, timeout: int = 120) -> dict:
+    base = ensure_cdp_proxy()
+    if not base:
+        raise ValueError("CDP proxy not available")
+    result = cdp_request_json(
+        f"{base}/eval?target={target_id}",
+        data=expression.encode("utf-8"),
+        method="POST",
+        timeout=timeout,
+    )
+    value = result.get("value")
+    if isinstance(value, dict):
+        return value
+    if result.get("error"):
+        raise ValueError(str(result.get("error")))
+    return {"value": value}
+
+
+def cdp_close_target(target_id: str) -> None:
+    base = cdp_proxy_base()
+    try:
+        urllib.request.urlopen(f"{base}/close?target={target_id}", timeout=5)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass
+
+
+def find_pdf_url_via_browser(landing_url: str) -> str | None:
+    print(f"[paperdown2md] Browser: resolving PDF link from {landing_url}")
+    html, _, _ = fetch_page_browser(landing_url)
+    candidates = extract_pdf_urls_from_html(html, landing_url)
+    if candidates:
+        print(f"[paperdown2md] Browser found PDF candidate: {candidates[0]}")
+        return candidates[0]
+    return None
+
+
+def browser_fetch_pdf(url: str, dest: Path, *, referer: str | None = None) -> None:
+    """Download PDF via in-page fetch (uses Chrome login cookies / institutional access)."""
+    context_url = referer or url
+    url_json = json.dumps(url)
+    init_js = f"""
+(async () => {{
+  const url = {url_json};
+  const r = await fetch(url, {{credentials: 'include', redirect: 'follow'}});
+  const ct = (r.headers.get('content-type') || '').toLowerCase();
+  if (!r.ok) return {{error: 'HTTP ' + r.status, status: r.status}};
+  const buf = await r.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  const head = Array.from(bytes.slice(0, 5)).map(b => String.fromCharCode(b)).join('');
+  if (head !== '%PDF-') {{
+    return {{error: 'not a PDF', contentType: ct, head: head, size: bytes.length}};
+  }}
+  window.__paperdown2mdPdf = bytes;
+  window.__paperdown2mdPdfOffset = 0;
+  return {{ok: true, size: bytes.length, contentType: ct}};
+}})()
+"""
+    chunk_js = """
+(() => {
+  const data = window.__paperdown2mdPdf;
+  if (!data) return {error: 'no pdf buffer'};
+  const chunkSize = 524288;
+  const start = window.__paperdown2mdPdfOffset;
+  const end = Math.min(start + chunkSize, data.length);
+  const chunk = data.slice(start, end);
+  let s = '';
+  for (let i = 0; i < chunk.length; i++) s += String.fromCharCode(chunk[i]);
+  window.__paperdown2mdPdfOffset = end;
+  return {done: end >= data.length, offset: end, total: data.length, b64: btoa(s)};
+})()
+"""
+
+    print(f"[paperdown2md] Browser fetch (session cookies): {url}")
+    init_result, target_id = cdp_eval_on_page(context_url, init_js, timeout=180, keep_open=True)
+    if not target_id:
+        raise RuntimeError("Browser fetch failed to open CDP tab")
+
+    try:
+        if init_result.get("error"):
+            raise RuntimeError(f"Browser fetch failed: {init_result['error']}")
+
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        with dest.open("wb") as out:
+            while True:
+                chunk = cdp_eval_on_target(target_id, chunk_js, timeout=180)
+                if chunk.get("error"):
+                    raise RuntimeError(chunk["error"])
+                out.write(base64.b64decode(chunk["b64"]))
+                if chunk.get("done"):
+                    break
+    finally:
+        cdp_close_target(target_id)
+
+
+def download_pdf_resolved(resolved: ResolvedPaper, dest: Path, *, no_browser: bool = False) -> None:
+    """Download PDF using HTTP, Europe PMC mirror, then browser CDP fallbacks."""
+    attempts: list[str] = []
+
+    if resolved.download_url:
+        timeout = 600 if "europepmc.org" in resolved.download_url else 300
+        if try_http_pdf(
+            resolved.download_url,
+            dest,
+            timeout=timeout,
+            referer=resolved.landing_url,
+        ):
+            return
+        attempts.append(f"HTTP: {resolved.download_url}")
+
+    if resolved.pmc_fallback_url:
+        print(f"[paperdown2md] Trying Europe PMC mirror: {resolved.pmc_fallback_url}")
+        if try_http_pdf(resolved.pmc_fallback_url, dest, timeout=600):
+            return
+        attempts.append(f"Europe PMC: {resolved.pmc_fallback_url}")
+
+    if no_browser:
+        joined = "; ".join(attempts) or "no download URL resolved"
+        raise RuntimeError(
+            f"PDF download failed ({joined}). Browser fallback disabled (--no-browser)."
+        )
+
+    print("[paperdown2md] HTTP insufficient; trying browser (CDP)…")
+
+    browser_pdf_url: str | None = None
+    landing = resolved.landing_url
+    if landing and not is_known_pdf_endpoint(landing):
+        browser_pdf_url = find_pdf_url_via_browser(landing)
+
+    for candidate in (
+        browser_pdf_url,
+        resolved.download_url,
+        resolved.pmc_fallback_url,
+    ):
+        if not candidate:
+            continue
+        if try_http_pdf(candidate, dest, timeout=600, referer=landing or candidate):
+            return
+
+    fetch_url = browser_pdf_url or resolved.download_url or resolved.pmc_fallback_url or landing
+    if not fetch_url:
+        raise RuntimeError("No URL available for browser PDF fetch")
+
+    browser_fetch_pdf(fetch_url, dest, referer=landing or fetch_url)
+    if not is_pdf_file(dest):
+        raise RuntimeError(
+            f"Browser fetch did not produce a valid PDF for {fetch_url!r}. "
+            "If this is paywalled, log in to your institution in Chrome first."
+        )
 
 
 def fetch_social_page(url: str, platform: str) -> tuple[str, str | None, str | None]:
@@ -650,8 +1099,105 @@ def fetch_social_page(url: str, platform: str) -> tuple[str, str | None, str | N
     return html, page_title, body_text
 
 
-def resolve_social_article(url: str) -> tuple[str, str]:
-    """Resolve WeChat / XHS post → (pdf_url, folder_title)."""
+def resolve_from_openalex_work(work: dict, fallback_title: str) -> ResolvedPaper:
+    pdf, title = pick_pdf_url(work)
+    title = title or fallback_title
+    pmc_url = resolve_pmc_fallback(work)
+    landing = pick_publisher_landing(work)
+
+    if pdf:
+        return ResolvedPaper(
+            title=title,
+            download_url=pdf,
+            landing_url=landing,
+            pmc_fallback_url=pmc_url,
+            work=work,
+        )
+
+    if pmc_url:
+        print(f"[paperdown2md] OpenAlex has no direct PDF; using PMC mirror: {pmc_url}")
+        return ResolvedPaper(
+            title=title,
+            download_url=pmc_url,
+            landing_url=landing,
+            pmc_fallback_url=pmc_url,
+            work=work,
+        )
+
+    if landing:
+        print(
+            f"[paperdown2md] OpenAlex has no direct PDF; will try publisher page via browser: {landing}"
+        )
+        return ResolvedPaper(
+            title=title,
+            landing_url=landing,
+            pmc_fallback_url=pmc_url,
+            work=work,
+        )
+
+    raise ValueError(
+        f"OpenAlex found '{title}' but no open PDF URL or PMC mirror; "
+        "try arXiv link, direct PDF URL, or manual download."
+    )
+
+
+def resolve_paper_source(source: str) -> ResolvedPaper:
+    """Resolve arXiv / DOI / PDF / OpenAlex title → ResolvedPaper."""
+    source = source.strip()
+    if not source:
+        raise ValueError("empty source")
+
+    m = EUROPEPMC_RENDER_RE.search(source)
+    if m:
+        pmcid = normalize_pmcid(m.group(1)) or m.group(1)
+        return ResolvedPaper(
+            title=pmcid,
+            download_url=europepmc_render_url(pmcid),
+            pmc_fallback_url=europepmc_render_url(pmcid),
+        )
+
+    m = PMC_ARTICLE_RE.search(source)
+    if m:
+        pmcid = f"PMC{m.group(1)}"
+        return ResolvedPaper(
+            title=pmcid,
+            download_url=europepmc_render_url(pmcid),
+            pmc_fallback_url=europepmc_render_url(pmcid),
+            landing_url=source if source.startswith("http") else None,
+        )
+
+    if is_known_pdf_endpoint(source) and (
+        source.startswith("http://") or source.startswith("https://")
+    ):
+        return ResolvedPaper(
+            title=Path(urllib.parse.urlparse(source).path).stem,
+            download_url=source,
+        )
+
+    arxiv_id = parse_arxiv_id(source)
+    if arxiv_id:
+        return ResolvedPaper(title=arxiv_id, download_url=arxiv_pdf_url(arxiv_id))
+
+    if source.startswith("http") and "arxiv.org" in source:
+        arxiv_id = parse_arxiv_id(source)
+        if arxiv_id:
+            return ResolvedPaper(title=arxiv_id, download_url=arxiv_pdf_url(arxiv_id))
+
+    if source.startswith("http") and is_publisher_landing_url(source):
+        return ResolvedPaper(title=source, landing_url=source)
+
+    work = openalex_work(source)
+    if work:
+        return resolve_from_openalex_work(work, source)
+
+    raise ValueError(
+        f"Cannot resolve PDF for: {source!r}. "
+        "Use arXiv URL/ID, DOI, direct .pdf URL, or English title for OpenAlex search."
+    )
+
+
+def resolve_social_article(url: str) -> ResolvedPaper:
+    """Resolve WeChat / XHS post → ResolvedPaper."""
     platform = social_platform(url)
     label = "WeChat" if platform == "weixin" else "XHS"
     print(f"[paperdown2md] Resolving {label} post: {url}")
@@ -662,8 +1208,16 @@ def resolve_social_article(url: str) -> tuple[str, str]:
 
     if paper_refs:
         print(f"[paperdown2md] Found {len(paper_refs)} paper ref(s); using: {paper_refs[0]}")
-        pdf_url, resolved_title = resolve_paper_source(paper_refs[0])
-        return pdf_url, title or resolved_title
+        resolved = resolve_paper_source(paper_refs[0])
+        if title:
+            return ResolvedPaper(
+                title=title,
+                download_url=resolved.download_url,
+                landing_url=resolved.landing_url,
+                pmc_fallback_url=resolved.pmc_fallback_url,
+                work=resolved.work,
+            )
+        return resolved
 
     queries = build_literature_search_queries(title, body_text)
     if not queries and title:
@@ -675,44 +1229,8 @@ def resolve_social_article(url: str) -> tuple[str, str]:
     return resolve_via_literature_search(queries, title)
 
 
-def resolve_paper_source(source: str) -> tuple[str, str]:
-    """Resolve arXiv / DOI / PDF / OpenAlex title → (pdf_url, suggested_title)."""
-    source = source.strip()
-    if not source:
-        raise ValueError("empty source")
-
-    if source.lower().endswith(".pdf") and (
-        source.startswith("http://") or source.startswith("https://")
-    ):
-        return source, Path(urllib.parse.urlparse(source).path).stem
-
-    arxiv_id = parse_arxiv_id(source)
-    if arxiv_id:
-        return arxiv_pdf_url(arxiv_id), arxiv_id
-
-    if source.startswith("http") and "arxiv.org" in source:
-        arxiv_id = parse_arxiv_id(source)
-        if arxiv_id:
-            return arxiv_pdf_url(arxiv_id), arxiv_id
-
-    work = openalex_work(source)
-    if work:
-        pdf, title = pick_pdf_url(work)
-        if pdf:
-            return pdf, title or source
-        raise ValueError(
-            f"OpenAlex found '{title or source}' but no open PDF URL; "
-            "try arXiv link, direct PDF URL, or manual download."
-        )
-
-    raise ValueError(
-        f"Cannot resolve PDF for: {source!r}. "
-        "Use arXiv URL/ID, DOI, direct .pdf URL, or English title for OpenAlex search."
-    )
-
-
-def resolve_source(source: str) -> tuple[str, str]:
-    """Return (pdf_url, suggested_title). Supports social post URLs as entry points."""
+def resolve_source(source: str) -> ResolvedPaper:
+    """Return ResolvedPaper. Supports social post URLs as entry points."""
     source = source.strip()
     if is_social_url(source):
         return resolve_social_article(source)
@@ -789,9 +1307,10 @@ def process_one(
     skip_extract: bool,
     model: str,
     timeout: int,
+    no_browser: bool = False,
 ) -> Path:
-    pdf_url, suggested_title = resolve_source(source)
-    name = sanitize_name(folder_name or suggested_title)
+    resolved = resolve_source(source)
+    name = sanitize_name(folder_name or resolved.title)
     paper_dir = output_dir / name
     paper_dir.mkdir(parents=True, exist_ok=True)
 
@@ -799,7 +1318,7 @@ def process_one(
     pdf_path = paper_dir / pdf_basename
 
     print(f"[paperdown2md] Downloading → {pdf_path}")
-    download_file(pdf_url, pdf_path)
+    download_pdf_resolved(resolved, pdf_path, no_browser=no_browser)
 
     size_mb = pdf_path.stat().st_size / (1024 * 1024)
     print(f"[paperdown2md] PDF saved ({size_mb:.1f} MB)")
@@ -841,6 +1360,11 @@ def main() -> int:
         help="Only download PDF; do not run MinerU",
     )
     parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Disable Chrome CDP browser fallback for PDF download",
+    )
+    parser.add_argument(
         "--model",
         default="vlm",
         choices=["vlm", "pipeline", "html"],
@@ -854,6 +1378,8 @@ def main() -> int:
     )
     args = parser.parse_args()
     require_skillsplace_env()
+
+    no_browser = args.no_browser or bool(os.environ.get("PAPERDOWN2MD_NO_BROWSER"))
 
     if not shutil.which("mineru-open-api") and not args.skip_extract:
         print("error: mineru-open-api not in PATH", file=sys.stderr)
@@ -876,6 +1402,7 @@ def main() -> int:
                     args.skip_extract,
                     args.model,
                     args.timeout,
+                    no_browser=no_browser,
                 )
             )
         except Exception as e:
