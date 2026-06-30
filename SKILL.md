@@ -9,10 +9,8 @@ description: >-
 compatibility: >-
   需要 mineru-open-api CLI 与 MinerU Token（~/.cursor/skills/mineru/key 或
   MINERU_TOKEN）。可选 lr（LightRead CLI）辅助检索。OpenAlex 无直链 PDF 时自动查 PMC
-  镜像并用 Chrome CDP 浏览器兜底（依赖 web-access skill）。本 skill 的 Python **必须**
-  在 skillsplace conda 环境中运行（macOS:
-  /Users/jaycexu/anaconda3/envs/skillsplace；Windows: D:\Anaconda\envs\skillsplace；
-  jumphost-inner: ~/xsjenv/miniconda3/envs/skillsplace）。禁止用系统 python3。
+  镜像并用 Chrome CDP 浏览器兜底（依赖 web-access skill）。Python 须在**专用 conda/venv**
+  中运行（维护者示例环境名 skillsplace；见下文「Python 环境说明」）。禁止用系统 python3。
 version: 1.3.0
 ---
 
@@ -29,6 +27,22 @@ version: 1.3.0
 ```
 
 参考示例：`paperdown2md/example/CIDD: Collaborative Intelligence for Structure-Based Drug Design Empowered by LLMs/`（文件夹可用代表性短名 `CIDD`，也可用完整标题）。
+
+## Python 环境说明
+
+**skillsplace** 是维护者自用的 **conda 环境名**，不是公共包，也 **不是** 克隆本 skill 的硬性前提。
+
+- **建议**：自行创建专属 conda/venv（名称任意），安装脚本所需依赖（本仓库 `paperdown2md.py` 以 stdlib 为主；MinerU 等见 compatibility）。
+- **维护者示例路径**（文档/脚本中的默认值，仅供参考）：
+
+| 环境 | 示例路径 |
+|------|----------|
+| macOS | `~/anaconda3/envs/skillsplace` |
+| Windows | `D:\Anaconda\envs\skillsplace` |
+| jumphost-inner | `~/xsjenv/miniconda3/envs/skillsplace` |
+
+- **覆盖检测**：设置 `SKILLSPLACE_PYTHON=/path/to/your/python`；或 `bash scripts/run.sh`（会依次尝试上述路径、`conda run -n skillsplace`、以及你指定的变量）。
+- **禁止**直接用系统 `python3` 跑 `paperdown2md.py`（维护者脚本会校验解释器路径，避免误用缺依赖的环境）。
 
 ## 何时触发
 
@@ -64,7 +78,7 @@ version: 1.3.0
 
 **优先用 bundled 脚本**（解析 arXiv、DOI、直链 PDF、公众号/小红书帖子、OpenAlex/arXiv 标题检索）。
 
-**Python 必须在 skillsplace 环境执行**——用 `scripts/run.sh`（自动定位 skillsplace 的 Python），不要直接 `python3`：
+**Python 必须在专用环境中执行**——推荐 `scripts/run.sh`（自动探测维护者示例 env 或 `SKILLSPLACE_PYTHON`），不要直接 `python3`：
 
 ```bash
 bash paperdown2md/scripts/run.sh \
@@ -73,16 +87,16 @@ bash paperdown2md/scripts/run.sh \
   "<标识>"
 ```
 
-或显式指定解释器（macOS 本机）：
+或显式指定解释器（macOS，路径按本机 conda 安装位置调整）：
 
 ```bash
-/Users/jaycexu/anaconda3/envs/skillsplace/bin/python paperdown2md/scripts/paperdown2md.py \
+~/anaconda3/envs/skillsplace/bin/python paperdown2md/scripts/paperdown2md.py \
   -o "<输出目录>" --name "<文件夹名>" "<标识>"
 ```
 
-| 环境 | skillsplace 路径 |
-|------|------------------|
-| macOS 本机 | `/Users/jaycexu/anaconda3/envs/skillsplace` |
+| 环境 | 维护者示例路径（非公共前提） |
+|------|------------------------------|
+| macOS | `~/anaconda3/envs/skillsplace` |
 | Windows 笔记本 | `D:\Anaconda\envs\skillsplace` |
 | jumphost-inner | `~/xsjenv/miniconda3/envs/skillsplace` |
 

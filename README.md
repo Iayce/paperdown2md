@@ -33,7 +33,7 @@ bash ~/.cursor/skills/paperdown2md/scripts/run.sh -o "./papers" --name "HE2RNA" 
 
 | Requirement | Notes |
 |-------------|-------|
-| **skillsplace** conda env | Python for `paperdown2md.py` must run here |
+| **Dedicated Python env** | Maintainer uses a private conda env named `skillsplace` — **not a public prerequisite**. Create your own env; use `scripts/run.sh` or set `SKILLSPLACE_PYTHON` |
 | **mineru-open-api** CLI | MinerU Open API client |
 | **MinerU Token** | `MINERU_TOKEN` env var or `~/.cursor/skills/mineru/key` — **never commit tokens** |
 

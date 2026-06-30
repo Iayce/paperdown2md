@@ -121,7 +121,7 @@ def require_skillsplace_env() -> None:
     print(
         "error: paperdown2md 必须在 skillsplace conda 环境中运行。\n"
         "  推荐: bash paperdown2md/scripts/run.sh ...\n"
-        "  macOS:  /Users/jaycexu/anaconda3/envs/skillsplace/bin/python ...\n"
+        "  macOS:  ~/anaconda3/envs/skillsplace/bin/python ...\n"
         "  Windows: D:\\Anaconda\\envs\\skillsplace\\python.exe ...\n"
         "  inner:   ~/xsjenv/miniconda3/envs/skillsplace/bin/python ...\n"
         f"  当前解释器: {sys.executable}",
